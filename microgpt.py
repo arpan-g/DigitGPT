@@ -30,6 +30,7 @@ import random
 import pickle
 
 random.seed(42)
+MODEL_FORMAT_VERSION = 2
 
 # -----------------------------------------------------------------------------
 # 1) Load dataset: docs separated by blank line
@@ -332,6 +333,7 @@ model_state = {key: [[p.data for p in row] for row in mat] for key, mat in state
 with open("ascii_model.pkl", "wb") as f:
     pickle.dump(
         {
+            "model_format_version": MODEL_FORMAT_VERSION,
             "state_dict": model_state,
             "uchars": uchars,
             "vocab_size": vocab_size,

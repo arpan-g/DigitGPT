@@ -35,6 +35,9 @@ The trainer now uses both:
 
 so the model can distinguish pixels that are on the same row, same column, or at different image locations more explicitly.
 
+> After pulling the latest code, retrain the model before generating images.
+> The checkpoint format was bumped for the 2D-aware model and older checkpoints are rejected on load.
+
 ## 3) Generate images
 
 ### Web app

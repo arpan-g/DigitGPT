@@ -33,6 +33,13 @@ CKPT_PATH = "ascii_model.pkl"
 with open(CKPT_PATH, "rb") as f:
     ckpt = pickle.load(f)
 
+model_format_version = ckpt.get("model_format_version", 1)
+if model_format_version < 2:
+    raise KeyError(
+        f"Checkpoint {CKPT_PATH} uses model_format_version={model_format_version}. "
+        "Re-train with the latest microgpt.py so row/column embeddings are available."
+    )
+
 required = ["state_dict", "uchars", "n_embd", "n_head", "n_layer", "block_size"]
 missing = [k for k in required if k not in ckpt]
 if missing:
@@ -70,8 +77,8 @@ for k, mat in list(state_dict.items()):
     state_dict[k] = [[_to_float(v) for v in row] for row in mat]
 
 print(
-    f"Loaded model: vocab_size={vocab_size}, n_embd={n_embd}, "
-    f"n_head={n_head}, n_layer={n_layer}, block_size={block_size}"
+    f"Loaded model: format=v{model_format_version}, vocab_size={vocab_size}, "
+    f"n_embd={n_embd}, n_head={n_head}, n_layer={n_layer}, block_size={block_size}"
 )
 
 # -----------------------------

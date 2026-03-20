@@ -4,10 +4,12 @@ microgpt_digits.py
 Pure-Python microGPT adapted for an 8x8 digits-style dataset stored in ascii_dataset.txt.
 
 Expected dataset format (IMPORTANT):
-- Each example/document is an 8-line string (each line length 8), lines separated by '\n'
+- Each example/document starts with a conditioning line: @<digit>
+- Followed by 8 lines (each line length 8), lines separated by '\n'
 - Documents are separated by a blank line => '\n\n'
 
 Example (one document):
+@5
 0123ABCD
 0123ABCD
 ...
@@ -61,6 +63,27 @@ vocab_size = len(uchars) + 1
 stoi = {ch: i for i, ch in enumerate(uchars)}  # faster than uchars.index
 print(f"vocab size: {vocab_size}")
 print("newline in vocab?", "\n" in uchars)
+
+
+# Optional sanity checks for conditioned dataset format.
+# This keeps backward compatibility with old datasets, while warning if
+# a mixed/unexpected format is detected.
+def _is_conditioned_doc(doc):
+    lines = doc.splitlines()
+    if not lines:
+        return False
+    if len(lines[0]) != 2 or lines[0][0] != "@" or not lines[0][1].isdigit():
+        return False
+    return True
+
+conditioned_docs = sum(1 for d in docs if _is_conditioned_doc(d))
+if conditioned_docs == len(docs):
+    print("dataset format: conditioned (@<digit> header present)")
+elif conditioned_docs == 0:
+    print("dataset format: unconditioned (no @<digit> headers)")
+else:
+    print(
+        f"warning: mixed dataset format ({conditioned_docs}/{len(docs)} conditioned docs)")
 
 # -----------------------------------------------------------------------------
 # 3) Autograd: scalar reverse-mode automatic differentiation
@@ -127,12 +150,15 @@ class Value:
 # -----------------------------------------------------------------------------
 # 4) Tiny GPT hyperparameters (tuned for 8x8 docs)
 # -----------------------------------------------------------------------------
-# An 8x8 doc with 7 internal newlines is ~71 chars.
+# An 8x8 doc with an optional "@d\n" header and 7 internal newlines is ~74 chars.
 # block_size must be >= that to generate full 8 lines reliably.
 n_embd = 32
 n_head = 4
 n_layer = 1
 block_size = 96
+max_grid_rows = 8
+max_grid_cols = 8
+special_row_col = max(max_grid_rows, max_grid_cols)
 
 assert n_embd % n_head == 0
 head_dim = n_embd // n_head
@@ -143,6 +169,8 @@ def matrix(nout, nin, std=0.08):
 state_dict = {
     "wte": matrix(vocab_size, n_embd),
     "wpe": matrix(block_size, n_embd),
+    "wre": matrix(max_grid_rows + 1, n_embd),
+    "wce": matrix(max_grid_cols + 1, n_embd),
     "lm_head": matrix(vocab_size, n_embd),
 }
 
@@ -174,10 +202,36 @@ def rmsnorm(x):
     scale = (ms + 1e-5) ** -0.5
     return [xi * scale for xi in x]
 
+def token_grid_position(tokens, pos_id):
+    row = 0
+    col = 0
+    for i in range(pos_id):
+        token = tokens[i]
+        if token == BOS:
+            continue
+        ch = uchars[token]
+        if ch == "\n":
+            row += 1
+            col = 0
+            continue
+        if ch == "@":
+            continue
+        if ch.isdigit() and i > 0 and tokens[i - 1] != BOS and uchars[tokens[i - 1]] == "@":
+            continue
+        if row < max_grid_rows and col < max_grid_cols:
+            col += 1
+
+    row = min(row, special_row_col)
+    col = min(col, special_row_col)
+    return row, col
+
 def gpt(token_id, pos_id, keys, values):
     tok_emb = state_dict["wte"][token_id]
     pos_emb = state_dict["wpe"][pos_id]
-    x = [t + p for t, p in zip(tok_emb, pos_emb)]
+    row_id, col_id = token_grid_position(keys["token_history"], pos_id)
+    row_emb = state_dict["wre"][row_id]
+    col_emb = state_dict["wce"][col_id]
+    x = [t + p + r + c for t, p, r, c in zip(tok_emb, pos_emb, row_emb, col_emb)]
     x = rmsnorm(x)
 
     for li in range(n_layer):
@@ -189,14 +243,14 @@ def gpt(token_id, pos_id, keys, values):
         k = linear(x, state_dict[f"layer{li}.attn_wk"])
         v = linear(x, state_dict[f"layer{li}.attn_wv"])
 
-        keys[li].append(k)
+        keys["layers"][li].append(k)
         values[li].append(v)
 
         x_attn = []
         for h in range(n_head):
             hs = h * head_dim
             q_h = q[hs:hs + head_dim]
-            k_h = [kk[hs:hs + head_dim] for kk in keys[li]]
+            k_h = [kk[hs:hs + head_dim] for kk in keys["layers"][li]]
             v_h = [vv[hs:hs + head_dim] for vv in values[li]]
 
             attn_logits = [
@@ -244,7 +298,8 @@ for step in range(num_steps):
     if n <= 0:
         continue
 
-    keys, values = [[] for _ in range(n_layer)], [[] for _ in range(n_layer)]
+    keys = {"layers": [[] for _ in range(n_layer)], "token_history": tokens[:n]}
+    values = [[] for _ in range(n_layer)]
     losses = []
 
     for pos_id in range(n):
@@ -284,6 +339,8 @@ with open("ascii_model.pkl", "wb") as f:
             "n_head": n_head,
             "n_layer": n_layer,
             "block_size": block_size,
+            "max_grid_rows": max_grid_rows,
+            "max_grid_cols": max_grid_cols,
         },
         f,
     )
@@ -293,19 +350,23 @@ print("✅ Model saved to ascii_model.pkl")
 # -----------------------------------------------------------------------------
 # 9) Inference: generate new 8x8 digit-like samples
 # -----------------------------------------------------------------------------
-def format_8x8(s):
-    # prints up to 8 lines; if model generates more, we just show the first 8
-    lines = s.splitlines()
-    return "\n".join(lines[:8])
-
-temperature = 0.9
-print("\n--- inference (generated 8x8 samples) ---")
-for sample_idx in range(20):
-    keys, values = [[] for _ in range(n_layer)], [[] for _ in range(n_layer)]
+def _sample_text(temperature=0.9, prompt=""):
+    keys = {"layers": [[] for _ in range(n_layer)], "token_history": []}
+    values = [[] for _ in range(n_layer)]
     token_id = BOS
     out = []
 
-    for pos_id in range(block_size):
+    # Force prompt tokens first (used for conditioned generation).
+    for pos_id, ch in enumerate(prompt):
+        if ch not in stoi:
+            raise ValueError(f"Prompt char {ch!r} not present in vocabulary")
+        keys["token_history"].append(token_id)
+        _ = gpt(token_id, pos_id, keys, values)
+        token_id = stoi[ch]
+
+    start_pos = len(prompt)
+    for pos_id in range(start_pos, block_size):
+        keys["token_history"].append(token_id)
         logits = gpt(token_id, pos_id, keys, values)
         probs = softmax([l / temperature for l in logits])
         token_id = random.choices(range(vocab_size), weights=[p.data for p in probs], k=1)[0]
@@ -320,6 +381,30 @@ for sample_idx in range(20):
         if len(out) >= 2 and out[-1] == "\n" and out[-2] == "\n":
             break
 
-    s = "".join(out).rstrip("\n")
-    print(f"sample {sample_idx+1:2d}:\n{format_8x8(s)}\n")
+    return "".join(out).rstrip("\n")
 
+
+def format_8x8(s):
+    # Ignore optional conditioning header line if present.
+    lines = s.splitlines()
+    if lines and lines[0].startswith("@"):
+        lines = lines[1:]
+    return "\n".join(lines[:8])
+
+
+def sample_conditioned(digit, temperature=0.9):
+    if digit < 0 or digit > 9:
+        raise ValueError("digit must be in range 0..9")
+    return _sample_text(temperature=temperature, prompt=f"@{digit}\n")
+
+
+temperature = 0.9
+print("\n--- inference (generated 8x8 samples) ---")
+for sample_idx in range(20):
+    if conditioned_docs == len(docs):
+        requested_digit = sample_idx % 10
+        s = sample_conditioned(requested_digit, temperature=temperature)
+        print(f"sample {sample_idx+1:2d} (requested digit={requested_digit}):\n{format_8x8(s)}\n")
+    else:
+        s = _sample_text(temperature=temperature)
+        print(f"sample {sample_idx+1:2d}:\n{format_8x8(s)}\n")

@@ -38,6 +38,16 @@ so the model can distinguish pixels that are on the same row, same column, or at
 > After pulling the latest code, retrain the model before generating images.
 > The checkpoint format was bumped for the 2D-aware model and older checkpoints are rejected on load.
 
+### Merge-conflict note
+
+Generated files should not be committed. The repo now ignores:
+- `ascii_dataset.txt`
+- `ascii_model.pkl`
+- `digit_*.png`
+- `__pycache__/`
+
+That helps avoid unnecessary merge conflicts when different branches train or generate locally.
+
 ## 3) Generate images
 
 ### Web app

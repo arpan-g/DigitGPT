@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# Generated training/runtime artifacts.
+ascii_dataset.txt
+ascii_model.pkl
+digit_*.png
